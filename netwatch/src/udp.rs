@@ -15,6 +15,8 @@ use tracing::{debug, trace, warn};
 
 use super::IpFamily;
 
+mod connected_peers;
+
 /// Wrapper around a tokio UDP socket.
 #[derive(Debug)]
 pub struct UdpSocket {
@@ -23,6 +25,8 @@ pub struct UdpSocket {
     send_waker: AtomicWaker,
     /// Set to true, when an error occurred, that means we need to rebind the socket.
     is_broken: AtomicBool,
+    /// Sockets connected to individual remotes; see [`connected_peers`].
+    peers: connected_peers::PeerSockets,
 }
 
 /// UDP socket read/write buffer size (7MB). The value of 7MB is chosen as it
@@ -81,6 +85,7 @@ impl UdpSocket {
     pub fn rebind(&self) -> io::Result<()> {
         {
             let mut guard = self.socket.write().unwrap();
+            self.peers.clear();
             guard.rebind()?;
 
             // Clear errors
@@ -104,6 +109,7 @@ impl UdpSocket {
             recv_waker: AtomicWaker::default(),
             send_waker: AtomicWaker::default(),
             is_broken: AtomicBool::new(false),
+            peers: connected_peers::PeerSockets::new(),
         })
     }
 
@@ -191,7 +197,11 @@ impl UdpSocket {
 
     /// Closes the socket, and waits for the underlying `libc::close` call to be finished.
     pub async fn close(&self) {
-        let socket = self.socket.write().unwrap().close();
+        let socket = {
+            let mut guard = self.socket.write().unwrap();
+            self.peers.clear();
+            guard.close()
+        };
         self.wake_all();
         if let Some((sock, _)) = socket {
             let std_sock = sock.into_std();
@@ -294,12 +304,28 @@ impl UdpSocket {
             return Ok(());
         }
 
+        self.peers.clear();
         guard.rebind()?;
         self.is_broken
             .store(false, std::sync::atomic::Ordering::Release);
         drop(guard);
         self.wake_all();
         Ok(())
+    }
+
+    /// Runs `send` with the shared socket's address while it is bound, under
+    /// the socket's read lock. Connected sockets hold the shared socket's port,
+    /// which a rebind can only bind again once they are closed: rebind and
+    /// close drop them under the write lock, so no send can open one meanwhile.
+    fn with_peers<T>(&self, send: impl FnOnce(SocketAddr) -> Option<T>) -> Option<T> {
+        if !connected_peers::enabled() {
+            return None;
+        }
+        let guard = self.socket.try_read().ok()?;
+        match &*guard {
+            SocketState::Connected { addr, .. } => send(*addr),
+            SocketState::Closed { .. } => None,
+        }
     }
 
     /// Poll for writable
@@ -330,6 +356,9 @@ impl UdpSocket {
 
     /// Send a noq based `Transmit`.
     pub fn try_send_noq(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+        if let Some(result) = self.with_peers(|local| self.peers.try_send(local, transmit)) {
+            return result;
+        }
         loop {
             self.maybe_rebind()?;
 
@@ -360,6 +389,9 @@ impl UdpSocket {
 
     /// poll send a noq based `Transmit`.
     pub fn poll_send_noq(&self, cx: &mut Context, transmit: &Transmit<'_>) -> Poll<io::Result<()>> {
+        if let Some(poll) = self.with_peers(|local| self.peers.poll_send(cx, local, transmit)) {
+            return poll;
+        }
         loop {
             if let Err(err) = self.maybe_rebind() {
                 return Poll::Ready(Err(err));
@@ -415,6 +447,11 @@ impl UdpSocket {
 
             match socket.poll_recv_ready(cx) {
                 Poll::Pending => {
+                    // The shared socket goes first, so a busy connected socket
+                    // can't hold back the remotes that arrive on it.
+                    if let Some(result) = self.peers.poll_recv(cx, bufs, meta) {
+                        return Poll::Ready(result);
+                    }
                     self.recv_waker.register(cx.waker());
                     return Poll::Pending;
                 }
@@ -955,6 +992,10 @@ impl UdpSender {
         cx: &mut Context,
     ) -> Poll<io::Result<()>> {
         let mut this = self.project();
+        let socket = &*this.socket;
+        if let Some(poll) = socket.with_peers(|local| socket.peers.poll_send(cx, local, transmit)) {
+            return poll;
+        }
         loop {
             if let Err(err) = this.socket.maybe_rebind() {
                 return Poll::Ready(Err(err));
@@ -999,6 +1040,12 @@ impl UdpSender {
 
     /// Best effort sending
     pub fn try_send(&self, transmit: &noq_udp::Transmit) -> io::Result<()> {
+        if let Some(result) = self
+            .socket
+            .with_peers(|local| self.socket.peers.try_send(local, transmit))
+        {
+            return result;
+        }
         self.socket.maybe_rebind()?;
 
         match self.socket.socket.try_read() {
