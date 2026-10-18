@@ -13,7 +13,8 @@ mod android;
     target_os = "openbsd",
     target_os = "netbsd",
     target_os = "macos",
-    target_os = "ios"
+    target_os = "ios",
+    target_os = "visionos"
 ))]
 mod bsd;
 #[cfg(target_os = "linux")]

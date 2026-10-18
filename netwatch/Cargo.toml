@@ -48,7 +48,7 @@ tokio = { version = "1", features = [
     "io-std",
 ] }
 
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "visionos"))'.dependencies]
 # msrv fix
 objc2-core-foundation = "0.3.2"
 objc2-system-configuration = "0.3.2"

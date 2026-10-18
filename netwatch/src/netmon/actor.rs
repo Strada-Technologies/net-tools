@@ -14,7 +14,8 @@ use super::android as os;
     target_os = "openbsd",
     target_os = "netbsd",
     target_os = "macos",
-    target_os = "ios"
+    target_os = "ios",
+    target_os = "visionos"
 ))]
 use super::bsd as os;
 #[cfg(target_os = "linux")]
@@ -36,11 +37,11 @@ pub(super) enum NetworkMessage {
 }
 
 /// How often we execute a check for big jumps in wall time.
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[cfg(not(any(target_os = "ios", target_os = "visionos", target_os = "android")))]
 const POLL_WALL_TIME_INTERVAL: Duration = Duration::from_secs(15);
 /// Set background polling time to 1h to effectively disable it on mobile,
 /// to avoid increased battery usage. Sleep detection won't work this way there.
-#[cfg(any(target_os = "ios", target_os = "android"))]
+#[cfg(any(target_os = "ios", target_os = "visionos", target_os = "android"))]
 const POLL_WALL_TIME_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const MON_CHAN_CAPACITY: usize = 16;
 const ACTOR_CHAN_CAPACITY: usize = 16;
